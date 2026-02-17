@@ -503,12 +503,46 @@ export const MemorySearchSchema = z
       .optional(),
     store: z
       .object({
-        driver: z.literal("sqlite").optional(),
+        driver: z.union([z.literal("sqlite"), z.literal("postgresql")]).optional(),
         path: z.string().optional(),
         vector: z
           .object({
             enabled: z.boolean().optional(),
             extensionPath: z.string().optional(),
+          })
+          .strict()
+          .optional(),
+        cache: z
+          .object({
+            enabled: z.boolean().optional(),
+            maxEntries: z.number().int().positive().optional(),
+          })
+          .strict()
+          .optional(),
+        postgresql: z
+          .object({
+            connectionString: z.string().optional().register(sensitive),
+            host: z.string().optional(),
+            port: z.number().int().positive().optional(),
+            database: z.string().optional(),
+            user: z.string().optional(),
+            password: z.string().optional().register(sensitive),
+            schema: z.string().optional(),
+            pool: z
+              .object({
+                max: z.number().int().positive().optional(),
+                idleTimeoutMillis: z.number().int().nonnegative().optional(),
+                connectionTimeoutMillis: z.number().int().nonnegative().optional(),
+              })
+              .strict()
+              .optional(),
+            vector: z
+              .object({
+                extension: z.literal("pgvector").optional(),
+                dimensions: z.number().int().positive().optional(),
+              })
+              .strict()
+              .optional(),
           })
           .strict()
           .optional(),

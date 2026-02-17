@@ -313,7 +313,7 @@ export type MemorySearchConfig = {
   };
   /** Index storage configuration. */
   store?: {
-    driver?: "sqlite";
+    driver?: "sqlite" | "postgresql";
     path?: string;
     vector?: {
       /** Enable sqlite-vec extension for vector search (default: true). */
@@ -326,6 +326,24 @@ export type MemorySearchConfig = {
       enabled?: boolean;
       /** Optional max cache entries per provider/model. */
       maxEntries?: number;
+    };
+    postgresql?: {
+      connectionString?: string;
+      host?: string;
+      port?: number;
+      database?: string;
+      user?: string;
+      password?: string;
+      schema?: string;
+      pool?: {
+        max?: number;
+        idleTimeoutMillis?: number;
+        connectionTimeoutMillis?: number;
+      };
+      vector?: {
+        extension?: "pgvector";
+        dimensions?: number;
+      };
     };
   };
   /** Chunking configuration. */

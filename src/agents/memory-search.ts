@@ -32,11 +32,33 @@ export type ResolvedMemorySearchConfig = {
     modelCacheDir?: string;
   };
   store: {
-    driver: "sqlite";
+    driver: "sqlite" | "postgresql";
     path: string;
     vector: {
       enabled: boolean;
       extensionPath?: string;
+    };
+    cache?: {
+      enabled: boolean;
+      maxEntries?: number;
+    };
+    postgresql?: {
+      connectionString?: string;
+      host?: string;
+      port?: number;
+      database?: string;
+      user?: string;
+      password?: string;
+      schema?: string;
+      pool?: {
+        max?: number;
+        idleTimeoutMillis?: number;
+        connectionTimeoutMillis?: number;
+      };
+      vector?: {
+        extension?: "pgvector";
+        dimensions?: number;
+      };
     };
   };
   chunking: {

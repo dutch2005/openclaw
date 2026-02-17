@@ -11,6 +11,8 @@ import { resolveSessionTranscriptsDirForAgent } from "../config/sessions/paths.j
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { onSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { resolveUserPath } from "../utils.js";
+import type { DatabaseAdapter } from "./db-adapter.js";
+import { createDatabaseAdapter } from "./db-factory.js";
 import { DEFAULT_GEMINI_EMBEDDING_MODEL } from "./embeddings-gemini.js";
 import { DEFAULT_OPENAI_EMBEDDING_MODEL } from "./embeddings-openai.js";
 import { DEFAULT_VOYAGE_EMBEDDING_MODEL } from "./embeddings-voyage.js";
@@ -240,7 +242,16 @@ export abstract class MemoryManagerSyncOps {
     return { sql: ` AND ${column} IN (${placeholders})`, params: sources };
   }
 
-  protected openDatabase(): DatabaseSync {
+  protected openDatabase(): DatabaseAdapter | DatabaseSync {
+    const driver = this.settings.store.driver;
+
+    if (driver === "postgresql") {
+      // Use PostgreSQL adapter
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return createDatabaseAdapter(this.settings.store as any, this.agentId);
+    }
+
+    // Default: SQLite
     const dbPath = resolveUserPath(this.settings.store.path);
     return this.openDatabaseAtPath(dbPath);
   }
