@@ -132,7 +132,7 @@ export abstract class MemoryManagerSyncOps {
   >();
 
   protected abstract readonly cache: { enabled: boolean; maxEntries?: number };
-  protected abstract db: DatabaseSync;
+  protected abstract db: DatabaseAdapter | DatabaseSync;
   protected abstract computeProviderKey(): string;
   protected abstract sync(params?: {
     reason?: string;
@@ -263,7 +263,7 @@ export abstract class MemoryManagerSyncOps {
     return new DatabaseSync(dbPath, { allowExtension: this.settings.store.vector.enabled });
   }
 
-  private seedEmbeddingCache(sourceDb: DatabaseSync): void {
+  private async seedEmbeddingCache(sourceDb: DatabaseSync): Promise<void> {
     if (!this.cache.enabled) {
       return;
     }
@@ -284,31 +284,31 @@ export abstract class MemoryManagerSyncOps {
       if (!rows.length) {
         return;
       }
-      const insert = this.db.prepare(
-        `INSERT INTO ${EMBEDDING_CACHE_TABLE} (provider, model, provider_key, hash, embedding, dims, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(provider, model, provider_key, hash) DO UPDATE SET
-           embedding=excluded.embedding,
-           dims=excluded.dims,
-           updated_at=excluded.updated_at`,
-      );
-      this.db.exec("BEGIN");
-      for (const row of rows) {
-        insert.run(
-          row.provider,
-          row.model,
-          row.provider_key,
-          row.hash,
-          row.embedding,
-          row.dims,
-          row.updated_at,
+
+      await this.db.transaction(async () => {
+        const insert = this.db.prepare(
+          `INSERT INTO ${EMBEDDING_CACHE_TABLE} (provider, model, provider_key, hash, embedding, dims, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(provider, model, provider_key, hash) DO UPDATE SET
+             embedding=excluded.embedding,
+             dims=excluded.dims,
+             updated_at=excluded.updated_at`,
         );
-      }
-      this.db.exec("COMMIT");
+        for (const row of rows) {
+          await insert.run(
+            row.provider,
+            row.model,
+            row.provider_key,
+            row.hash,
+            row.embedding,
+            row.dims,
+            row.updated_at,
+          );
+        }
+      });
     } catch (err) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
+      const message = err instanceof Error ? err.message : String(err);
+      log.error(`Failed to seed embedding cache: ${message}`);
       throw err;
     }
   }
@@ -680,25 +680,29 @@ export abstract class MemoryManagerSyncOps {
     });
     await runWithConcurrency(tasks, this.getIndexConcurrency());
 
-    const staleRows = this.db
+    const staleRows = (await this.db
       .prepare(`SELECT path FROM files WHERE source = ?`)
-      .all("memory") as Array<{ path: string }>;
+      .all("memory")) as Array<{ path: string }>;
     for (const stale of staleRows) {
       if (activePaths.has(stale.path)) {
         continue;
       }
-      this.db.prepare(`DELETE FROM files WHERE path = ? AND source = ?`).run(stale.path, "memory");
+      await this.db
+        .prepare(`DELETE FROM files WHERE path = ? AND source = ?`)
+        .run(stale.path, "memory");
       try {
-        this.db
+        await this.db
           .prepare(
             `DELETE FROM ${VECTOR_TABLE} WHERE id IN (SELECT id FROM chunks WHERE path = ? AND source = ?)`,
           )
           .run(stale.path, "memory");
       } catch {}
-      this.db.prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`).run(stale.path, "memory");
+      await this.db
+        .prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`)
+        .run(stale.path, "memory");
       if (this.fts.enabled && this.fts.available) {
         try {
-          this.db
+          await this.db
             .prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ? AND source = ? AND model = ?`)
             .run(stale.path, "memory", this.provider.model);
         } catch {}
@@ -783,29 +787,29 @@ export abstract class MemoryManagerSyncOps {
     });
     await runWithConcurrency(tasks, this.getIndexConcurrency());
 
-    const staleRows = this.db
+    const staleRows = (await this.db
       .prepare(`SELECT path FROM files WHERE source = ?`)
-      .all("sessions") as Array<{ path: string }>;
+      .all("sessions")) as Array<{ path: string }>;
     for (const stale of staleRows) {
       if (activePaths.has(stale.path)) {
         continue;
       }
-      this.db
+      await this.db
         .prepare(`DELETE FROM files WHERE path = ? AND source = ?`)
         .run(stale.path, "sessions");
       try {
-        this.db
+        await this.db
           .prepare(
             `DELETE FROM ${VECTOR_TABLE} WHERE id IN (SELECT id FROM chunks WHERE path = ? AND source = ?)`,
           )
           .run(stale.path, "sessions");
       } catch {}
-      this.db
+      await this.db
         .prepare(`DELETE FROM chunks WHERE path = ? AND source = ?`)
         .run(stale.path, "sessions");
       if (this.fts.enabled && this.fts.available) {
         try {
-          this.db
+          await this.db
             .prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ? AND source = ? AND model = ?`)
             .run(stale.path, "sessions", this.provider.model);
         } catch {}
@@ -852,7 +856,7 @@ export abstract class MemoryManagerSyncOps {
       });
     }
     const vectorReady = await this.ensureVectorReady();
-    const meta = this.readMeta();
+    const meta = await this.readMeta();
     const needsFullReindex =
       params?.force ||
       !meta ||
@@ -1032,7 +1036,7 @@ export abstract class MemoryManagerSyncOps {
     let nextMeta: MemoryIndexMeta | null = null;
 
     try {
-      this.seedEmbeddingCache(originalDb);
+      await this.seedEmbeddingCache(originalDb);
       const shouldSyncMemory = this.sources.has("memory");
       const shouldSyncSessions = this.shouldSyncSessions(
         { reason: params.reason, force: params.force },
@@ -1069,11 +1073,19 @@ export abstract class MemoryManagerSyncOps {
         nextMeta.vectorDims = this.vector.dims;
       }
 
-      this.writeMeta(nextMeta);
+      await this.writeMeta(nextMeta);
       this.pruneEmbeddingCacheIfNeeded?.();
 
-      this.db.close();
-      originalDb.close();
+      // Handle both sync (DatabaseSync) and async (DatabaseAdapter) close
+      const thisCloseResult = this.db.close();
+      if (thisCloseResult instanceof Promise) {
+        await thisCloseResult;
+      }
+      // originalDb might be DatabaseSync (sync close) or DatabaseAdapter (async close)
+      const originalCloseResult = originalDb.close();
+      if (originalCloseResult instanceof Promise) {
+        await originalCloseResult;
+      }
       originalDbClosed = true;
 
       await this.swapIndexFiles(dbPath, tempDbPath);
@@ -1135,7 +1147,7 @@ export abstract class MemoryManagerSyncOps {
       nextMeta.vectorDims = this.vector.dims;
     }
 
-    this.writeMeta(nextMeta);
+    await this.writeMeta(nextMeta);
     this.pruneEmbeddingCacheIfNeeded?.();
   }
 
@@ -1152,8 +1164,8 @@ export abstract class MemoryManagerSyncOps {
     this.sessionsDirtyFiles.clear();
   }
 
-  protected readMeta(): MemoryIndexMeta | null {
-    const row = this.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(META_KEY) as
+  protected async readMeta(): Promise<MemoryIndexMeta | null> {
+    const row = (await this.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(META_KEY)) as
       | { value: string }
       | undefined;
     if (!row?.value) {
@@ -1166,9 +1178,9 @@ export abstract class MemoryManagerSyncOps {
     }
   }
 
-  protected writeMeta(meta: MemoryIndexMeta) {
+  protected async writeMeta(meta: MemoryIndexMeta): Promise<void> {
     const value = JSON.stringify(meta);
-    this.db
+    await this.db
       .prepare(
         `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       )

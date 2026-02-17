@@ -132,6 +132,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       providerResult,
       purpose: params.purpose,
     });
+    await manager.init();
     INDEX_CACHE.set(key, manager);
     return manager;
   }
@@ -173,16 +174,23 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       available: null,
       extensionPath: params.settings.store.vector.extensionPath,
     };
-    const meta = this.readMeta();
-    if (meta?.vectorDims) {
-      this.vector.dims = meta.vectorDims;
-    }
     this.ensureWatcher();
     this.ensureSessionListener();
     this.ensureIntervalSync();
     const statusOnly = params.purpose === "status";
-    this.dirty = this.sources.has("memory") && (statusOnly ? !meta : true);
+    // Note: this.dirty will be set in init() after reading meta
+    this.dirty = this.sources.has("memory") && statusOnly;
     this.batch = this.resolveBatchConfig();
+  }
+
+  private async init(): Promise<void> {
+    const meta = await this.readMeta();
+    if (meta?.vectorDims) {
+      this.vector.dims = meta.vectorDims;
+    }
+    const statusOnly =
+      this.cfg.agents?.list?.find((a) => a.id === this.agentId)?.memorySearch === undefined;
+    this.dirty = this.sources.has("memory") && (statusOnly ? !meta : true);
   }
 
   async warmSession(sessionKey?: string): Promise<void> {
