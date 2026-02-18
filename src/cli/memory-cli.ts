@@ -747,4 +747,458 @@ export function registerMemoryCli(program: Command) {
         });
       },
     );
+
+  memory
+    .command("migrate")
+    .description("Migrate memory databases from SQLite to PostgreSQL")
+    .requiredOption("--to <driver>", "Target database driver (currently only 'postgresql')")
+    .requiredOption("--host <host>", "PostgreSQL host")
+    .requiredOption("--database <database>", "PostgreSQL database name")
+    .requiredOption("--user <user>", "PostgreSQL username")
+    .option("--port <port>", "PostgreSQL port", "5432")
+    .option("--password <password>", "PostgreSQL password (or set POSTGRES_PASSWORD env var)")
+    .option(
+      "--schema <schema>",
+      "Schema name pattern (default: agent_{agentId})",
+      "agent_{agentId}",
+    )
+    .option("--agent <id>", "Agent id to migrate (default: all agents)")
+    .option("--dry-run", "Preview migration without making changes", false)
+    .option("--verbose", "Verbose logging", false)
+    .addHelpText(
+      "after",
+      () =>
+        `\n${theme.heading("Examples:")}\n${formatHelpExamples([
+          [
+            "openclaw memory migrate --to postgresql --host localhost --database openclaw --user openclaw",
+            "Migrate all agents to PostgreSQL",
+          ],
+          [
+            "openclaw memory migrate --to postgresql --host 192.168.1.160 --database openclaw_router --user openclaw_router --agent codex",
+            "Migrate specific agent",
+          ],
+          [
+            "openclaw memory migrate --to postgresql --host localhost --database openclaw --user openclaw --dry-run",
+            "Preview migration",
+          ],
+        ])}\n\n${theme.muted("Note:")} PostgreSQL password can be set via POSTGRES_PASSWORD environment variable or --password flag.\n\n${theme.muted("Docs:")} ${formatDocsLink("/cli/memory/migrate", "docs.openclaw.ai/cli/memory/migrate")}\n`,
+    )
+    .action(
+      async (opts: {
+        to: string;
+        host: string;
+        port: string;
+        database: string;
+        user: string;
+        password?: string;
+        schema: string;
+        agent?: string;
+        dryRun?: boolean;
+        verbose?: boolean;
+      }) => {
+        setVerbose(Boolean(opts.verbose));
+
+        // Validate target driver
+        if (opts.to !== "postgresql") {
+          defaultRuntime.error(`Unsupported target driver: ${opts.to}`);
+          defaultRuntime.error("Currently only 'postgresql' is supported.");
+          process.exitCode = 1;
+          return;
+        }
+
+        // Get password from env or option
+        const password = opts.password || process.env.POSTGRES_PASSWORD;
+        if (!password) {
+          defaultRuntime.error("PostgreSQL password required.");
+          defaultRuntime.error(
+            "Set via --password flag or POSTGRES_PASSWORD environment variable.",
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        const cfg = loadConfig();
+        const agentIds = resolveAgentIds(cfg, opts.agent);
+
+        if (agentIds.length === 0) {
+          defaultRuntime.error("No agents found to migrate.");
+          process.exitCode = 1;
+          return;
+        }
+
+        // Check if better-sqlite3 is available
+        let Database: typeof import("better-sqlite3").default;
+        try {
+          const sqlite = await import("better-sqlite3");
+          Database = sqlite.default;
+        } catch {
+          defaultRuntime.error(
+            "better-sqlite3 not available. Install with: npm install better-sqlite3",
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        // Check if pg is available
+        let Pool: typeof import("pg").Pool;
+        try {
+          const pg = await import("pg");
+          Pool = pg.Pool;
+        } catch {
+          defaultRuntime.error("pg not available. Install with: npm install pg");
+          process.exitCode = 1;
+          return;
+        }
+
+        // Create PostgreSQL connection
+        const connectionString = `postgresql://${opts.user}:${password}@${opts.host}:${opts.port}/${opts.database}`;
+        const pgPool = new Pool({ connectionString });
+
+        try {
+          // Test PostgreSQL connection
+          defaultRuntime.log("Testing PostgreSQL connection...");
+          const testClient = await pgPool.connect();
+          const versionResult = await testClient.query("SELECT version()");
+          const version = versionResult.rows[0].version.split(" ").slice(0, 2).join(" ");
+          defaultRuntime.log(`✅ Connected to ${version}`);
+
+          // Check pgvector extension
+          const extResult = await testClient.query(
+            "SELECT * FROM pg_extension WHERE extname = 'vector'",
+          );
+          if (extResult.rows.length === 0) {
+            defaultRuntime.error("❌ pgvector extension not found");
+            defaultRuntime.error("   Install with: CREATE EXTENSION vector;");
+            testClient.release();
+            process.exitCode = 1;
+            return;
+          }
+          defaultRuntime.log("✅ pgvector extension available");
+          testClient.release();
+
+          if (opts.dryRun) {
+            defaultRuntime.log("\n🔍 DRY RUN MODE - No changes will be made\n");
+          }
+
+          // Migrate each agent
+          for (const agentId of agentIds) {
+            const schema = opts.schema.replace("{agentId}", agentId);
+            const sqlitePath = path.join(
+              resolveStateDir(process.env, os.homedir),
+              "memory",
+              `${agentId}.sqlite`,
+            );
+
+            if (!fsSync.existsSync(sqlitePath)) {
+              defaultRuntime.log(`\n⚠️  No SQLite database found for agent: ${agentId}`);
+              defaultRuntime.log(`   Expected: ${shortenHomePath(sqlitePath)}`);
+              continue;
+            }
+
+            defaultRuntime.log(`\n📦 Migrating agent: ${agentId}`);
+            defaultRuntime.log(`   Source: ${shortenHomePath(sqlitePath)}`);
+            defaultRuntime.log(`   Target schema: ${schema}`);
+
+            if (opts.dryRun) {
+              const sqlite = new Database(sqlitePath, { readonly: true });
+              const metaCount = sqlite.prepare("SELECT COUNT(*) as count FROM meta").get() as {
+                count: number;
+              };
+              const filesCount = sqlite.prepare("SELECT COUNT(*) as count FROM files").get() as {
+                count: number;
+              };
+              const chunksCount = sqlite.prepare("SELECT COUNT(*) as count FROM chunks").get() as {
+                count: number;
+              };
+              const cacheCount = sqlite
+                .prepare("SELECT COUNT(*) as count FROM embedding_cache")
+                .get() as { count: number };
+              sqlite.close();
+
+              defaultRuntime.log(`   Rows to migrate:`);
+              defaultRuntime.log(`      - meta: ${metaCount.count}`);
+              defaultRuntime.log(`      - files: ${filesCount.count}`);
+              defaultRuntime.log(`      - chunks: ${chunksCount.count}`);
+              defaultRuntime.log(`      - embedding_cache: ${cacheCount.count}`);
+              continue;
+            }
+
+            // Perform migration
+            await withProgress(
+              { label: "Creating schema...", fallback: opts.verbose ? "line" : undefined },
+              async () => {
+                const client = await pgPool.connect();
+                try {
+                  await client.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+                  await client.query(`CREATE EXTENSION IF NOT EXISTS vector`);
+
+                  // Create tables
+                  await client.query(`
+                    CREATE TABLE IF NOT EXISTS ${schema}.meta (
+                      key TEXT PRIMARY KEY,
+                      value TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS ${schema}.files (
+                      path TEXT PRIMARY KEY,
+                      source TEXT NOT NULL DEFAULT 'memory',
+                      hash TEXT NOT NULL,
+                      mtime BIGINT NOT NULL,
+                      size BIGINT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS ${schema}.chunks (
+                      id TEXT PRIMARY KEY,
+                      path TEXT NOT NULL,
+                      source TEXT NOT NULL DEFAULT 'memory',
+                      start_line INTEGER NOT NULL,
+                      end_line INTEGER NOT NULL,
+                      hash TEXT NOT NULL,
+                      model TEXT NOT NULL,
+                      text TEXT NOT NULL,
+                      embedding vector(1536),
+                      updated_at BIGINT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS ${schema}.embedding_cache (
+                      provider TEXT NOT NULL,
+                      model TEXT NOT NULL,
+                      provider_key TEXT NOT NULL,
+                      hash TEXT NOT NULL,
+                      embedding vector(1536),
+                      dims INTEGER,
+                      updated_at BIGINT NOT NULL,
+                      PRIMARY KEY (provider, model, provider_key, hash)
+                    );
+                  `);
+                } finally {
+                  client.release();
+                }
+              },
+            );
+
+            // Open SQLite database
+            const sqlite = new Database(sqlitePath, { readonly: true });
+
+            try {
+              // Migrate meta
+              await withProgress(
+                { label: "Migrating meta table...", fallback: opts.verbose ? "line" : undefined },
+                async () => {
+                  const metaRows = sqlite.prepare("SELECT * FROM meta").all();
+                  const client = await pgPool.connect();
+                  try {
+                    for (const row of metaRows as { key: string; value: string }[]) {
+                      await client.query(
+                        `INSERT INTO ${schema}.meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+                        [row.key, row.value],
+                      );
+                    }
+                  } finally {
+                    client.release();
+                  }
+                  defaultRuntime.log(`   ✅ Migrated ${metaRows.length} meta rows`);
+                },
+              );
+
+              // Migrate files
+              await withProgress(
+                { label: "Migrating files table...", fallback: opts.verbose ? "line" : undefined },
+                async () => {
+                  const fileRows = sqlite.prepare("SELECT * FROM files").all();
+                  const client = await pgPool.connect();
+                  try {
+                    for (const row of fileRows as {
+                      path: string;
+                      source: string;
+                      hash: string;
+                      mtime: number;
+                      size: number;
+                    }[]) {
+                      await client.query(
+                        `INSERT INTO ${schema}.files (path, source, hash, mtime, size) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (path) DO NOTHING`,
+                        [row.path, row.source, row.hash, row.mtime, row.size],
+                      );
+                    }
+                  } finally {
+                    client.release();
+                  }
+                  defaultRuntime.log(`   ✅ Migrated ${fileRows.length} file rows`);
+                },
+              );
+
+              // Migrate chunks
+              const chunksCount = (
+                sqlite.prepare("SELECT COUNT(*) as count FROM chunks").get() as { count: number }
+              ).count;
+              let migratedChunks = 0;
+
+              await withProgressTotals(
+                {
+                  label: "Migrating chunks table...",
+                  total: chunksCount,
+                  fallback: opts.verbose ? "line" : undefined,
+                },
+                async (update) => {
+                  const chunkRows = sqlite.prepare("SELECT * FROM chunks").all();
+                  const client = await pgPool.connect();
+                  try {
+                    for (const row of chunkRows as {
+                      id: string;
+                      path: string;
+                      source: string;
+                      start_line: number;
+                      end_line: number;
+                      hash: string;
+                      model: string;
+                      text: string;
+                      embedding: Buffer | null;
+                      updated_at: number;
+                    }[]) {
+                      // Convert embedding
+                      let embeddingArray: number[] | null = null;
+                      if (row.embedding) {
+                        const float32Array = new Float32Array(
+                          row.embedding.buffer,
+                          row.embedding.byteOffset,
+                          row.embedding.byteLength / 4,
+                        );
+                        embeddingArray = Array.from(float32Array);
+                      }
+
+                      await client.query(
+                        `INSERT INTO ${schema}.chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10)
+                         ON CONFLICT (id) DO NOTHING`,
+                        [
+                          row.id,
+                          row.path,
+                          row.source,
+                          row.start_line,
+                          row.end_line,
+                          row.hash,
+                          row.model,
+                          row.text,
+                          embeddingArray ? JSON.stringify(embeddingArray) : null,
+                          row.updated_at,
+                        ],
+                      );
+
+                      migratedChunks++;
+                      update({ completed: migratedChunks, total: chunksCount });
+                    }
+                  } finally {
+                    client.release();
+                  }
+                  defaultRuntime.log(`   ✅ Migrated ${migratedChunks} chunk rows`);
+                },
+              );
+
+              // Migrate embedding_cache
+              const cacheCount = (
+                sqlite.prepare("SELECT COUNT(*) as count FROM embedding_cache").get() as {
+                  count: number;
+                }
+              ).count;
+              let migratedCache = 0;
+
+              await withProgressTotals(
+                {
+                  label: "Migrating embedding_cache table...",
+                  total: cacheCount,
+                  fallback: opts.verbose ? "line" : undefined,
+                },
+                async (update) => {
+                  const cacheRows = sqlite.prepare("SELECT * FROM embedding_cache").all();
+                  const client = await pgPool.connect();
+                  try {
+                    for (const row of cacheRows as {
+                      provider: string;
+                      model: string;
+                      provider_key: string;
+                      hash: string;
+                      embedding: Buffer | null;
+                      dims: number | null;
+                      updated_at: number;
+                    }[]) {
+                      // Convert embedding
+                      let embeddingArray: number[] | null = null;
+                      if (row.embedding) {
+                        const float32Array = new Float32Array(
+                          row.embedding.buffer,
+                          row.embedding.byteOffset,
+                          row.embedding.byteLength / 4,
+                        );
+                        embeddingArray = Array.from(float32Array);
+                      }
+
+                      await client.query(
+                        `INSERT INTO ${schema}.embedding_cache (provider, model, provider_key, hash, embedding, dims, updated_at)
+                         VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
+                         ON CONFLICT (provider, model, provider_key, hash) DO NOTHING`,
+                        [
+                          row.provider,
+                          row.model,
+                          row.provider_key,
+                          row.hash,
+                          embeddingArray ? JSON.stringify(embeddingArray) : null,
+                          row.dims,
+                          row.updated_at,
+                        ],
+                      );
+
+                      migratedCache++;
+                      update({ completed: migratedCache, total: cacheCount });
+                    }
+                  } finally {
+                    client.release();
+                  }
+                  defaultRuntime.log(`   ✅ Migrated ${migratedCache} cache rows`);
+                },
+              );
+
+              // Create indexes
+              await withProgress(
+                { label: "Creating indexes...", fallback: opts.verbose ? "line" : undefined },
+                async () => {
+                  const client = await pgPool.connect();
+                  try {
+                    await client.query(`
+                      CREATE INDEX IF NOT EXISTS idx_chunks_path ON ${schema}.chunks(path);
+                      CREATE INDEX IF NOT EXISTS idx_chunks_source ON ${schema}.chunks(source);
+                      CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON ${schema}.chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+                      CREATE INDEX IF NOT EXISTS idx_embedding_cache_updated_at ON ${schema}.embedding_cache(updated_at);
+                    `);
+                  } finally {
+                    client.release();
+                  }
+                  defaultRuntime.log("   ✅ Indexes created");
+                },
+              );
+
+              defaultRuntime.log(`\n✅ Migration complete for ${agentId}`);
+            } finally {
+              sqlite.close();
+            }
+          }
+
+          if (!opts.dryRun) {
+            defaultRuntime.log("\n🎉 All agents migrated successfully!");
+            defaultRuntime.log("\nNext steps:");
+            defaultRuntime.log(
+              `1. Update your configuration to use PostgreSQL (see docs/gateway/database-configuration.md)`,
+            );
+            defaultRuntime.log(
+              `2. Verify with: openclaw memory status --agent ${agentIds[0] ?? "main"}`,
+            );
+            defaultRuntime.log(`3. (Optional) Backup SQLite files before deleting`);
+          } else {
+            defaultRuntime.log("\n✅ Dry run complete - no changes made");
+          }
+        } catch (err) {
+          const message = formatErrorMessage(err);
+          defaultRuntime.error(`Migration failed: ${message}`);
+          process.exitCode = 1;
+        } finally {
+          await pgPool.end();
+        }
+      },
+    );
 }
