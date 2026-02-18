@@ -242,7 +242,7 @@ describe("createDatabaseAdapter", () => {
   describe("Agent ID placeholder replacement", () => {
     it("replaces {agentId} in SQLite path", () => {
       const config: DatabaseConfig = {
-        path: "/var/lib/openclaw/{agentId}/memory.sqlite",
+        path: "/tmp/{agentId}-test.sqlite",
       };
       const adapter = createDatabaseAdapter(config, "pixel");
 
