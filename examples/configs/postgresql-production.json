@@ -1,0 +1,60 @@
+{
+  "$schema": "../../src/config/config.schema.json",
+  "agents": {
+    "defaults": {
+      "memorySearch": {
+        "enabled": true,
+        "provider": "openai",
+        "model": "text-embedding-3-small",
+        "store": {
+          "driver": "postgresql",
+          "postgresql": {
+            "host": "postgres.example.com",
+            "port": 5432,
+            "database": "openclaw_production",
+            "user": "openclaw",
+            "schema": "agent_{agentId}",
+            "pool": {
+              "max": 20,
+              "idleTimeoutMillis": 30000,
+              "connectionTimeoutMillis": 5000
+            },
+            "vector": {
+              "extension": "pgvector",
+              "dimensions": 1536
+            }
+          }
+        },
+        "cache": {
+          "enabled": true,
+          "maxEntries": 10000
+        },
+        "query": {
+          "maxResults": 10,
+          "minScore": 0.4,
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.6,
+            "textWeight": 0.4,
+            "candidateMultiplier": 4,
+            "mmr": {
+              "enabled": true,
+              "lambda": 0.7
+            },
+            "temporalDecay": {
+              "enabled": true,
+              "halfLifeDays": 30
+            }
+          }
+        },
+        "sync": {
+          "onSessionStart": true,
+          "onSearch": false,
+          "watch": true,
+          "watchDebounceMs": 5000,
+          "intervalMinutes": 60
+        }
+      }
+    }
+  }
+}
