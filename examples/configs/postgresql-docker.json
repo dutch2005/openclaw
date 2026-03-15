@@ -1,0 +1,30 @@
+{
+  "$schema": "../../src/config/config.schema.json",
+  "agents": {
+    "defaults": {
+      "memorySearch": {
+        "enabled": true,
+        "provider": "auto",
+        "store": {
+          "driver": "postgresql",
+          "postgresql": {
+            "host": "postgres",
+            "port": 5432,
+            "database": "openclaw",
+            "user": "openclaw",
+            "schema": "agent_{agentId}",
+            "pool": {
+              "max": 15,
+              "idleTimeoutMillis": 30000,
+              "connectionTimeoutMillis": 5000
+            },
+            "vector": {
+              "extension": "pgvector",
+              "dimensions": 1536
+            }
+          }
+        }
+      }
+    }
+  }
+}

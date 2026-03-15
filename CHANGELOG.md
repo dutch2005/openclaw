@@ -2060,6 +2060,7 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+- **Memory/Database: add configurable PostgreSQL support for multi-agent shared knowledge deployments.** Introduces a database adapter layer with PostgreSQL and SQLite drivers, enabling agents to share memory via PostgreSQL with pgvector while keeping SQLite as the zero-config default. PostgreSQL support includes schema-per-agent isolation, IVFFlat vector indexes, tsvector full-text search, connection pooling, and a migration script for SQLite→PostgreSQL data transfer. See `docs/gateway/database-configuration.md` for configuration examples, use cases, and performance tuning.
 - iOS/Watch: add an Apple Watch companion MVP with watch inbox UI, watch notification relay handling, and gateway command surfaces for watch status/send flows. (#20054) Thanks @mbelinky.
 - iOS/Gateway: wake disconnected iOS nodes via APNs before `nodes.invoke` and auto-reconnect gateway sessions on silent push wake to reduce invoke failures while the app is backgrounded. (#20332) Thanks @mbelinky.
 - Gateway/CLI: add paired-device hygiene flows with `device.pair.remove`, plus `openclaw devices remove` and guarded `openclaw devices clear --yes [--pending]` commands for removing paired entries and optionally rejecting pending requests. (#20057) Thanks @mbelinky.
