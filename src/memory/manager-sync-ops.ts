@@ -894,7 +894,7 @@ export abstract class MemoryManagerSyncOps {
 
     const staleRows = this.db
       .prepare(`SELECT path FROM files WHERE source = ?`)
-      .all("sessions")) as Array<{ path: string }>;
+      .all("sessions") as Array<{ path: string }>;
     for (const stale of staleRows) {
       if (activePaths.has(stale.path)) {
         continue;
