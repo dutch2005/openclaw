@@ -1358,7 +1358,7 @@ export abstract class MemoryManagerSyncOps {
     if (this.lastMetaSerialized === value) {
       return;
     }
-    this.db
+    await this.db
       .prepare(
         `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       )
